@@ -6,3 +6,6 @@ docx.js.map
 /*.json
 /*.config
 *.log
+
+!package-lock.json
+*.tgz

@@ -1,4 +1,4 @@
-[![npm version](https://badge.fury.io/js/docx-preview.svg)](https://www.npmjs.com/package/docx-preview)
+[![npm version](https://img.shields.io/npm/v/@lofcz/docx-preview)](https://www.npmjs.com/package/@lofcz/docx-preview)
 [![Support Ukraine](https://img.shields.io/badge/Support-Ukraine-blue?style=flat&logo=adguard)](https://war.ukraine.ua/)
 
 # docxjs
@@ -14,7 +14,7 @@ That means library is limited by HTML capabilities (for example Google Docs rend
 Installation
 -----
 ```
-npm install docx-preview
+npm install @lofcz/docx-preview
 ```
 
 Usage
@@ -114,3 +114,6 @@ So far I can't come up with final approach of parsing documents and final struct
 Contributing
 ------
 Please do not include contents of `./dist` folder in your PR's. Otherwise I most likely will reject it due to stability and security concerns.
+
+
+Fork releases are published as `@lofcz/docx-preview`. See [Publishing](docs/publishing.md) for the first manual publish and subsequent GitHub Actions releases.
