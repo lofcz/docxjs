@@ -54,7 +54,7 @@ export function parseVmlElement(elem: Element, parser: DocumentParser): VmlEleme
 				break;
 
 			case "fillcolor": 
-				result.attrs.fill = at.value; 
+				result.attrs.fill = normalizeVmlColor(at.value);
 				break;
 
 			case "from":
@@ -108,9 +108,13 @@ export function parseVmlElement(elem: Element, parser: DocumentParser): VmlEleme
 	return result;
 }
 
+function normalizeVmlColor(value: string): string {
+	return value?.replace(/\s*\[\d+\]\s*$/, "").trim();
+}
+
 function parseStroke(el: Element): Record<string, string> {
 	return {
-		'stroke': xml.attr(el, "color"),
+		'stroke': normalizeVmlColor(xml.attr(el, "color")),
 		'stroke-width': xml.lengthAttr(el, "weight", LengthUsage.Emu) ?? '1px'
 	};
 }

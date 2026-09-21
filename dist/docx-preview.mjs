@@ -41,6 +41,9 @@ function parseRelationships(root, xml) {
 function escapeClassName(className) {
     return className?.replace(/[ .]+/g, '-').replace(/[&]+/g, 'and').toLowerCase();
 }
+function escapeCssString(value) {
+    return value.replace(/[\\"\n\r\f\0]/g, c => `\\${c.charCodeAt(0).toString(16)} `);
+}
 function encloseFontFamily(fontFamily) {
     return /^[^"'].*\s.*[^"']$/.test(fontFamily) ? `'${fontFamily}'` : fontFamily;
 }
@@ -64,7 +67,7 @@ function keyBy(array, by) {
     return array.reduce((a, x) => {
         a[by(x)] = x;
         return a;
-    }, {});
+    }, Object.create(null));
 }
 function blobToBase64(blob) {
     return new Promise((resolve, reject) => {
@@ -85,7 +88,9 @@ function mergeDeep(target, ...sources) {
         return target;
     const source = sources.shift();
     if (isObject(target) && isObject(source)) {
-        for (const key in source) {
+        for (const key of Object.keys(source)) {
+            if (["__proto__", "constructor", "prototype"].includes(key))
+                continue;
             if (isObject(source[key])) {
                 const val = target[key] ?? (target[key] = {});
                 mergeDeep(val, source[key]);
@@ -1021,7 +1026,7 @@ function parseSettings(elem, xml) {
                 result.endnoteProps = parseNoteProperties(el, xml);
                 break;
             case "autoHyphenation":
-                result.autoHyphenation = xml.boolAttr(el, "val");
+                result.autoHyphenation = xml.boolAttr(el, "val", true);
                 break;
             case "evenAndOddHeaders":
                 result.evenAndOddHeaders = xml.boolAttr(el, "val", true);
@@ -1302,7 +1307,7 @@ function parseVmlElement(elem, parser) {
                 result.cssStyleText = at.value;
                 break;
             case "fillcolor":
-                result.attrs.fill = at.value;
+                result.attrs.fill = normalizeVmlColor(at.value);
                 break;
             case "from":
                 const [x1, y1] = parsePoint(at.value);
@@ -1346,9 +1351,12 @@ function parseVmlElement(elem, parser) {
     }
     return result;
 }
+function normalizeVmlColor(value) {
+    return value?.replace(/\s*\[\d+\]\s*$/, "").trim();
+}
 function parseStroke(el) {
     return {
-        'stroke': globalXmlParser.attr(el, "color"),
+        'stroke': normalizeVmlColor(globalXmlParser.attr(el, "color")),
         'stroke-width': globalXmlParser.lengthAttr(el, "weight", LengthUsage.Emu) ?? '1px'
     };
 }
@@ -1509,6 +1517,7 @@ class DocumentParser {
     parseDefaultStyles(node) {
         var result = {
             id: null,
+            isDocDefaults: true,
             name: null,
             target: null,
             basedOn: null,
@@ -1589,6 +1598,8 @@ class DocumentParser {
                     result.runProps = parseRunProperties(n, globalXmlParser);
                     break;
                 case "tblPr":
+                    result.rowBandSize = globalXmlParser.element(n, "tblStyleRowBandSize") && globalXmlParser.intAttr(globalXmlParser.element(n, "tblStyleRowBandSize"), "val");
+                    result.colBandSize = globalXmlParser.element(n, "tblStyleColBandSize") && globalXmlParser.intAttr(globalXmlParser.element(n, "tblStyleColBandSize"), "val");
                 case "tcPr":
                     result.styles.push({
                         target: "td",
@@ -1621,35 +1632,35 @@ class DocumentParser {
         switch (type) {
             case "firstRow":
                 modificator = ".first-row";
-                selector = "tr.first-row td";
+                selector = "> tr.first-row > td";
                 break;
             case "lastRow":
                 modificator = ".last-row";
-                selector = "tr.last-row td";
+                selector = "> tr.last-row > td";
                 break;
             case "firstCol":
                 modificator = ".first-col";
-                selector = "td.first-col";
+                selector = "> tr > td.first-col";
                 break;
             case "lastCol":
                 modificator = ".last-col";
-                selector = "td.last-col";
+                selector = "> tr > td.last-col";
                 break;
             case "band1Vert":
                 modificator = ":not(.no-vband)";
-                selector = "td.odd-col";
+                selector = "> tr > td.odd-col";
                 break;
             case "band2Vert":
                 modificator = ":not(.no-vband)";
-                selector = "td.even-col";
+                selector = "> tr > td.even-col";
                 break;
             case "band1Horz":
                 modificator = ":not(.no-hband)";
-                selector = "tr.odd-row";
+                selector = "> tr.odd-row > td";
                 break;
             case "band2Horz":
                 modificator = ":not(.no-hband)";
-                selector = "tr.even-row";
+                selector = "> tr.even-row > td";
                 break;
             default: return [];
         }
@@ -1657,14 +1668,14 @@ class DocumentParser {
             switch (n.localName) {
                 case "pPr":
                     result.push({
-                        target: `${selector} p`,
+                        target: `${selector} > p`,
                         mod: modificator,
                         values: this.parseDefaultProperties(n, {})
                     });
                     break;
                 case "rPr":
                     result.push({
-                        target: `${selector} span`,
+                        target: `${selector} > p span`,
                         mod: modificator,
                         values: this.parseDefaultProperties(n, {})
                     });
@@ -1793,6 +1804,9 @@ class DocumentParser {
                 case "r":
                     result.children.push(this.parseRun(el, result));
                     break;
+                case "fldSimple":
+                    result.children.push(this.parseSimpleField(el, result));
+                    break;
                 case "hyperlink":
                     result.children.push(this.parseHyperlink(el, result));
                     break;
@@ -1855,12 +1869,28 @@ class DocumentParser {
         if (dropCap == "drop")
             paragraph.cssStyle["float"] = "left";
     }
+    parseSimpleField(node, parent) {
+        return {
+            type: DomType.SimpleField,
+            instruction: globalXmlParser.attr(node, "instr"),
+            lock: globalXmlParser.boolAttr(node, "fldLock", false),
+            dirty: globalXmlParser.boolAttr(node, "dirty", false),
+            parent,
+            children: this.parseParagraph(node).children
+        };
+    }
     parseHyperlink(node, parent) {
         var result = { type: DomType.Hyperlink, parent: parent, children: [] };
         result.anchor = globalXmlParser.attr(node, "anchor");
         result.id = globalXmlParser.attr(node, "id");
         for (const c of globalXmlParser.elements(node)) {
             switch (c.localName) {
+                case "commentRangeStart":
+                    result.children.push(new WmlCommentRangeStart(globalXmlParser.attr(c, "id")));
+                    break;
+                case "commentRangeEnd":
+                    result.children.push(new WmlCommentRangeEnd(globalXmlParser.attr(c, "id")));
+                    break;
                 case "r":
                     result.children.push(this.parseRun(c, result));
                     break;
@@ -1909,12 +1939,7 @@ class DocumentParser {
                     result.children.push(new WmlCommentReference(globalXmlParser.attr(c, "id")));
                     break;
                 case "fldSimple":
-                    result.children.push({
-                        type: DomType.SimpleField,
-                        instruction: globalXmlParser.attr(c, "instr"),
-                        lock: globalXmlParser.boolAttr(c, "lock", false),
-                        dirty: globalXmlParser.boolAttr(c, "dirty", false)
-                    });
+                    result.children.push(this.parseSimpleField(c, result));
                     break;
                 case "instrText":
                     result.fieldRun = true;
@@ -2364,6 +2389,8 @@ class DocumentParser {
     }
     parseDefaultProperties(elem, style = null, childStyle = null, handler = null) {
         style = style || {};
+        const highlight = globalXmlParser.element(elem, "highlight");
+        const highlightColor = highlight && globalXmlParser.attr(highlight, "val");
         for (const c of globalXmlParser.elements(elem)) {
             if (handler?.(c))
                 continue;
@@ -2381,10 +2408,12 @@ class DocumentParser {
                     style["font-size"] = style["min-height"] = globalXmlParser.lengthAttr(c, "val", LengthUsage.FontSize);
                     break;
                 case "shd":
-                    style["background-color"] = xmlUtil.colorAttr(c, "fill", null, autos.shd);
+                    if (!highlightColor || highlightColor == "none")
+                        style["background-color"] = xmlUtil.colorAttr(c, "fill", null, autos.shd);
                     break;
                 case "highlight":
-                    style["background-color"] = xmlUtil.colorAttr(c, "val", null, autos.highlight);
+                    if (highlightColor != "none" || !globalXmlParser.element(elem, "shd"))
+                        style["background-color"] = xmlUtil.colorAttr(c, "val", null, autos.highlight);
                     break;
                 case "vertAlign":
                     break;
@@ -2808,17 +2837,17 @@ class values {
     static classNameOftblLook(c) {
         const val = globalXmlParser.hexAttr(c, "val", 0);
         let className = "";
-        if (globalXmlParser.boolAttr(c, "firstRow") || (val & 0x0020))
+        if (globalXmlParser.boolAttr(c, "firstRow", !!(val & 0x0020)))
             className += " first-row";
-        if (globalXmlParser.boolAttr(c, "lastRow") || (val & 0x0040))
+        if (globalXmlParser.boolAttr(c, "lastRow", !!(val & 0x0040)))
             className += " last-row";
-        if (globalXmlParser.boolAttr(c, "firstColumn") || (val & 0x0080))
+        if (globalXmlParser.boolAttr(c, "firstColumn", !!(val & 0x0080)))
             className += " first-col";
-        if (globalXmlParser.boolAttr(c, "lastColumn") || (val & 0x0100))
+        if (globalXmlParser.boolAttr(c, "lastColumn", !!(val & 0x0100)))
             className += " last-col";
-        if (globalXmlParser.boolAttr(c, "noHBand") || (val & 0x0200))
+        if (globalXmlParser.boolAttr(c, "noHBand", !!(val & 0x0200)))
             className += " no-hband";
-        if (globalXmlParser.boolAttr(c, "noVBand") || (val & 0x0400))
+        if (globalXmlParser.boolAttr(c, "noVBand", !!(val & 0x0400)))
             className += " no-vband";
         return className.trim();
     }
@@ -2961,13 +2990,14 @@ class HtmlRenderer {
         this.postRenderTasks = [];
         this.h = h;
     }
-    async render(document, options) {
+    async render(document, options, deferTabStops = false) {
         this.document = document;
         this.options = options;
         this.className = options.className;
         this.rootSelector = options.inWrapper ? `.${this.className}-wrapper` : ':root';
         this.h = options.h ?? h;
         this.styleMap = null;
+        this.defaultParagraphStyleName = null;
         this.tasks = [];
         if (this.options.renderComments && globalThis.Highlight) {
             this.commentHighlight = new Highlight();
@@ -3007,7 +3037,8 @@ class HtmlRenderer {
         }
         this.postRenderTasks.forEach(t => t());
         await Promise.allSettled(this.tasks);
-        this.refreshTabStops();
+        if (!deferTabStops && options.experimental)
+            setTimeout(() => void this.refreshTabStops(), 500);
         return result;
     }
     renderTheme(themePart) {
@@ -3068,6 +3099,8 @@ class HtmlRenderer {
         for (const style of styles.filter(x => x.basedOn)) {
             var baseStyle = stylesMap[style.basedOn];
             if (baseStyle) {
+                style.rowBandSize ?? (style.rowBandSize = baseStyle.rowBandSize);
+                style.colBandSize ?? (style.colBandSize = baseStyle.colBandSize);
                 style.paragraphProps = mergeDeep(style.paragraphProps, baseStyle.paragraphProps);
                 style.runProps = mergeDeep(style.runProps, baseStyle.runProps);
                 for (const baseValues of baseStyle.styles) {
@@ -3086,6 +3119,7 @@ class HtmlRenderer {
         for (let style of styles) {
             style.cssName = this.processStyleName(style.id);
         }
+        this.defaultParagraphStyleName = styles.find(s => s.target == "p" && s.isDefault && s.id)?.id;
         return stylesMap;
     }
     prodessNumberings(numberings) {
@@ -3110,6 +3144,7 @@ class HtmlRenderer {
         }
     }
     processTable(table) {
+        this.applyTableConditionalClasses(table);
         for (var r of table.children) {
             for (var c of r.children) {
                 c.cssStyle = this.copyStyleProperties(table.cellStyle, c.cssStyle, [
@@ -3120,6 +3155,48 @@ class HtmlRenderer {
             }
         }
     }
+    applyTableConditionalClasses(table) {
+        if (table.className == null)
+            return;
+        const look = new Set(table.className.split(/\s+/));
+        const rows = table.children;
+        const style = this.findStyle(table.styleName);
+        const rowBand = Math.max(1, table.rowBandSize ?? style?.rowBandSize ?? 1);
+        const colBand = Math.max(1, table.colBandSize ?? style?.colBandSize ?? 1);
+        const columnCount = table.columns?.length || Math.max(0, ...rows.map(row => (row.gridBefore ?? 0) + (row.gridAfter ?? 0) +
+            row.children.reduce((n, cell) => n + (cell.span || 1), 0)));
+        let bandRow = 0;
+        rows.forEach((row, index) => {
+            const first = index == 0 && look.has("first-row");
+            const last = index == rows.length - 1 && look.has("last-row");
+            const classes = [];
+            if (first)
+                classes.push("first-row");
+            if (last)
+                classes.push("last-row");
+            if (!first && !last && !look.has("no-hband"))
+                classes.push(Math.floor(bandRow++ / rowBand) % 2 ? "even-row" : "odd-row");
+            row.className ?? (row.className = classes.join(" "));
+            let col = row.gridBefore ?? 0;
+            for (const cell of row.children) {
+                const span = cell.span || 1;
+                const first = col == 0 && look.has("first-col");
+                const last = col + span == columnCount && look.has("last-col");
+                const classes = [];
+                if (first)
+                    classes.push("first-col");
+                if (last)
+                    classes.push("last-col");
+                if (!first && !last && !look.has("no-vband")) {
+                    const offset = col - (look.has("first-col") ? 1 : 0);
+                    if (offset >= 0)
+                        classes.push(Math.floor(offset / colBand) % 2 ? "even-col" : "odd-col");
+                }
+                cell.className ?? (cell.className = classes.join(" "));
+                col += span;
+            }
+        });
+    }
     copyStyleProperties(input, output, attrs = null) {
         if (!input)
             return output;
@@ -3128,7 +3205,7 @@ class HtmlRenderer {
         if (attrs == null)
             attrs = Object.getOwnPropertyNames(input);
         for (var key of attrs) {
-            if (input.hasOwnProperty(key) && !output.hasOwnProperty(key))
+            if (Object.prototype.hasOwnProperty.call(input, key) && !Object.prototype.hasOwnProperty.call(output, key))
                 output[key] = input[key];
         }
         return output;
@@ -3253,56 +3330,52 @@ class HtmlRenderer {
     splitBySection(elements, defaultProps) {
         var current = { sectProps: null, elements: [], pageBreak: false };
         var result = [current];
-        for (let elem of elements) {
-            if (elem.type == DomType.Paragraph) {
-                const p = elem;
-                const s = this.findStyle(p.styleName);
-                const pageBreakBefore = p.pageBreakBefore ?? s?.paragraphProps?.pageBreakBefore;
-                if (this.options.breakPages && pageBreakBefore && current.elements.length > 0) {
-                    current.pageBreak = true;
-                    current = { sectProps: null, elements: [], pageBreak: false };
-                    result.push(current);
-                }
+        const pending = elements.slice();
+        for (let i = 0; i < pending.length; i++) {
+            const elem = pending[i];
+            if (elem.type != DomType.Paragraph) {
+                current.elements.push(elem);
+                continue;
             }
-            current.elements.push(elem);
-            if (elem.type == DomType.Paragraph) {
-                const p = elem;
-                var sectProps = p.sectionProps;
-                var pBreakIndex = -1;
-                var rBreakIndex = -1;
-                if (this.options.breakPages && p.children) {
-                    pBreakIndex = p.children.findIndex(r => {
-                        rBreakIndex = r.children?.findIndex(this.isPageBreakElement.bind(this)) ?? -1;
-                        return rBreakIndex != -1;
-                    });
+            const p = elem;
+            const style = this.findStyle(this.effectiveParagraphStyleName(p));
+            const before = p.pageBreakBefore ?? style?.paragraphProps?.pageBreakBefore;
+            if (this.options.breakPages && before && current.elements.length > 0) {
+                current.pageBreak = true;
+                result.push(current = { sectProps: null, elements: [], pageBreak: false });
+            }
+            let breakIndex = -1;
+            const runIndex = this.options.breakPages ? p.children?.findIndex(run => {
+                breakIndex = run.children?.findIndex(e => this.isPageBreakElement(e)) ?? -1;
+                return breakIndex >= 0;
+            }) ?? -1 : -1;
+            if (runIndex >= 0) {
+                const run = p.children[runIndex];
+                const head = { ...p, children: p.children.slice(0, runIndex) };
+                const tail = { ...p, pageBreakBefore: false,
+                    children: p.children.slice(runIndex + 1) };
+                if (breakIndex > 0)
+                    head.children.push({ ...run, children: run.children.slice(0, breakIndex) });
+                if (breakIndex + 1 < run.children.length)
+                    tail.children.unshift({ ...run, children: run.children.slice(breakIndex + 1) });
+                if (tail.children.length) {
+                    if (this.hasRenderableContent(head))
+                        tail.suppressNumbering = true;
+                    else
+                        head.suppressNumbering = true;
+                    head.sectionProps = null;
+                    pending.splice(i + 1, 0, tail);
                 }
-                if (sectProps || pBreakIndex != -1) {
-                    current.sectProps = sectProps;
-                    current.pageBreak = pBreakIndex != -1;
-                    current = { sectProps: null, elements: [], pageBreak: false };
-                    result.push(current);
-                }
-                if (pBreakIndex != -1) {
-                    let breakRun = p.children[pBreakIndex];
-                    let splitRun = rBreakIndex < breakRun.children.length - 1;
-                    if (pBreakIndex < p.children.length - 1 || splitRun) {
-                        var children = p.children;
-                        var newParagraph = { ...p, children: children.slice(pBreakIndex) };
-                        p.children = children.slice(0, pBreakIndex);
-                        current.elements.push(newParagraph);
-                        if (splitRun || rBreakIndex > 0) {
-                            let runChildren = breakRun.children;
-                            let newRun = { ...breakRun, children: runChildren.slice(0, rBreakIndex) };
-                            p.children.push(newRun);
-                            breakRun.children = runChildren.slice(rBreakIndex);
-                        }
-                        if (this.hasRenderableContent(p)) {
-                            newParagraph.suppressNumbering = true;
-                        }
-                        else {
-                            p.suppressNumbering = true;
-                        }
-                    }
+                current.elements.push(head);
+                current.sectProps = head.sectionProps;
+                current.pageBreak = true;
+                result.push(current = { sectProps: null, elements: [], pageBreak: false });
+            }
+            else {
+                current.elements.push(p);
+                if (p.sectionProps) {
+                    current.sectProps = p.sectionProps;
+                    result.push(current = { sectProps: null, elements: [], pageBreak: false });
                 }
             }
         }
@@ -3437,8 +3510,10 @@ section.${c}>footer { z-index: 1; }
     renderStyles(styles) {
         var styleText = "";
         const stylesMap = this.styleMap;
-        const defautStyles = keyBy(styles.filter(s => s.isDefault), s => s.target);
+        const defautStyles = keyBy(styles.filter(s => s.isDefault && s.id != null), s => s.target);
         for (const style of styles) {
+            if (style.id == null && !style.isDocDefaults)
+                continue;
             var subStyles = style.styles;
             if (style.linked) {
                 var linkedStyle = style.linked && stylesMap[style.linked];
@@ -3448,7 +3523,7 @@ section.${c}>footer { z-index: 1; }
                     console.warn(`Can't find linked style ${style.linked}`);
             }
             for (const subStyle of subStyles) {
-                var selector = `${style.target ?? ''}.${style.cssName}`;
+                var selector = `${style.target ?? ''}.${style.cssName}${subStyle.mod ?? ''}`;
                 if (style.target != subStyle.target)
                     selector += ` ${subStyle.target}`;
                 if (defautStyles[style.target] == style)
@@ -3485,6 +3560,8 @@ section.${c}>footer { z-index: 1; }
                 return this.renderTableCell(elem);
             case DomType.Hyperlink:
                 return this.renderHyperlink(elem);
+            case DomType.SimpleField:
+                return this.renderElements(elem.children);
             case DomType.SmartTag:
                 return this.renderSmartTag(elem);
             case DomType.Drawing:
@@ -3596,7 +3673,7 @@ section.${c}>footer { z-index: 1; }
         return this.h({ ns, tagName, children: this.renderElements(elem.children), ...props });
     }
     renderParagraph(elem) {
-        const style = this.findStyle(elem.styleName);
+        const style = this.findStyle(this.effectiveParagraphStyleName(elem));
         elem.tabs ?? (elem.tabs = style?.paragraphProps?.tabs);
         var result = this.toHTML(elem, ns.html, "p");
         if (this.options.exposeParaIds && elem.paraId) {
@@ -3669,7 +3746,7 @@ section.${c}>footer { z-index: 1; }
     renderAltChunk(elem) {
         if (!this.options.renderAltChunks)
             return null;
-        var result = this.h({ tagName: "iframe" });
+        var result = this.h({ tagName: "iframe", sandbox: "" });
         this.tasks.push(this.document.loadAltChunk(elem.id, this.currentPart).then(x => {
             result.srcdoc = x;
         }));
@@ -3759,7 +3836,7 @@ section.${c}>footer { z-index: 1; }
             return null;
         let children = this.renderElements(elem.children);
         if (elem.verticalAlign) {
-            children = [this.h({ tagName: elem.verticalAlign, children: this.renderElements(elem.children) })];
+            children = [this.h({ tagName: elem.verticalAlign, children })];
         }
         const result = this.toHTML(elem, ns.html, "span", children);
         if (elem.id)
@@ -3930,7 +4007,9 @@ section.${c}>footer { z-index: 1; }
     }
     toH(elem, ns, tagName, children = null) {
         const { "$lang": lang, ...style } = elem.cssStyle ?? {};
-        const className = cx(elem.className, elem.styleName && this.processStyleName(elem.styleName));
+        const styleName = elem.type == DomType.Paragraph
+            ? this.effectiveParagraphStyleName(elem) : elem.styleName;
+        const className = cx(elem.className, styleName && this.processStyleName(styleName));
         return { ns, tagName, className, lang, style, children: children ?? this.renderElements(elem.children) };
     }
     toHTML(elem, ns, tagName, children = null) {
@@ -3938,6 +4017,9 @@ section.${c}>footer { z-index: 1; }
     }
     findStyle(styleName) {
         return styleName && this.styleMap?.[styleName];
+    }
+    effectiveParagraphStyleName(p) {
+        return p.styleName ?? this.defaultParagraphStyleName;
     }
     numberingClass(id, lvl) {
         return `${this.className}-num-${id}-${lvl}`;
@@ -3967,7 +4049,7 @@ section.${c}>footer { z-index: 1; }
             "tab": "\\9",
             "space": "\\a0",
         };
-        var result = text.replace(/%[1-9]/g, s => {
+        var result = escapeCssString(text).replace(/%[1-9]/g, s => {
             let lvl = parseInt(s.substring(1), 10) - 1;
             const format = levels.find(l => l.id == id && l.level == lvl)?.format;
             if (!format || format == "bullet" || format == "none")
@@ -4013,17 +4095,19 @@ section.${c}>footer { z-index: 1; }
             taiwaneseCountingThousand: "cjk-ideographic",
             taiwaneseDigital: "cjk-decimal",
         };
-        return mapping[format] ?? format;
+        return Object.prototype.hasOwnProperty.call(mapping, format) ? mapping[format]
+            : (/^[a-zA-Z][a-zA-Z0-9-]*$/.test(format) ? format : "decimal");
     }
-    refreshTabStops() {
-        if (!this.options.experimental)
+    async refreshTabStops() {
+        if (!this.options.experimental || !this.currentTabs.some(t => t.span.isConnected))
             return;
-        setTimeout(() => {
-            const pixelToPoint = computePixelToPoint();
-            for (let tab of this.currentTabs) {
+        this.currentTabs.find(t => t.span.isConnected).span.getBoundingClientRect();
+        await document.fonts?.ready;
+        const pixelToPoint = computePixelToPoint();
+        for (const tab of this.currentTabs) {
+            if (tab.span.isConnected)
                 updateTabStop(tab.span, tab.stops, this.defaultTabSize, pixelToPoint);
-            }
-        }, 500);
+        }
     }
     createElementNS(ns, tagName, props, children) {
         return this.h({ ns, tagName, children, ...props });
@@ -4082,7 +4166,8 @@ async function renderDocument(document, userOptions) {
 }
 async function renderAsync(data, bodyContainer, styleContainer, userOptions) {
     const doc = await parseAsync(data, userOptions);
-    const nodes = await renderDocument(doc, userOptions);
+    const renderer = new HtmlRenderer();
+    const nodes = await renderer.render(doc, { ...defaultOptions, ...userOptions }, true);
     styleContainer ?? (styleContainer = bodyContainer);
     styleContainer.innerHTML = "";
     bodyContainer.innerHTML = "";
@@ -4090,6 +4175,7 @@ async function renderAsync(data, bodyContainer, styleContainer, userOptions) {
         const c = n.nodeName === "STYLE" ? styleContainer : bodyContainer;
         c.appendChild(n);
     }
+    await renderer.refreshTabStops();
     return doc;
 }
 

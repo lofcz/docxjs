@@ -171,6 +171,7 @@ export class DocumentParser {
 	parseDefaultStyles(node: Element): IDomStyle {
 		var result = <IDomStyle>{
 			id: null,
+			isDocDefaults: true,
 			name: null,
 			target: null,
 			basedOn: null,
@@ -261,6 +262,8 @@ export class DocumentParser {
 					break;
 
 				case "tblPr":
+					result.rowBandSize = xml.element(n, "tblStyleRowBandSize") && xml.intAttr(xml.element(n, "tblStyleRowBandSize"), "val");
+					result.colBandSize = xml.element(n, "tblStyleColBandSize") && xml.intAttr(xml.element(n, "tblStyleColBandSize"), "val");
 				case "tcPr":
 					result.styles.push({
 						target: "td", //TODO: maybe move to processor
@@ -301,35 +304,35 @@ export class DocumentParser {
 		switch (type) {
 			case "firstRow":
 				modificator = ".first-row";
-				selector = "tr.first-row td";
+				selector = "> tr.first-row > td";
 				break;
 			case "lastRow":
 				modificator = ".last-row";
-				selector = "tr.last-row td";
+				selector = "> tr.last-row > td";
 				break;
 			case "firstCol":
 				modificator = ".first-col";
-				selector = "td.first-col";
+				selector = "> tr > td.first-col";
 				break;
 			case "lastCol":
 				modificator = ".last-col";
-				selector = "td.last-col";
+				selector = "> tr > td.last-col";
 				break;
 			case "band1Vert":
 				modificator = ":not(.no-vband)";
-				selector = "td.odd-col";
+				selector = "> tr > td.odd-col";
 				break;
 			case "band2Vert":
 				modificator = ":not(.no-vband)";
-				selector = "td.even-col";
+				selector = "> tr > td.even-col";
 				break;
 			case "band1Horz":
 				modificator = ":not(.no-hband)";
-				selector = "tr.odd-row";
+				selector = "> tr.odd-row > td";
 				break;
 			case "band2Horz":
 				modificator = ":not(.no-hband)";
-				selector = "tr.even-row";
+				selector = "> tr.even-row > td";
 				break;
 			default: return [];
 		}
@@ -338,7 +341,7 @@ export class DocumentParser {
 			switch (n.localName) {
 				case "pPr":
 					result.push({
-						target: `${selector} p`,
+						target: `${selector} > p`,
 						mod: modificator,
 						values: this.parseDefaultProperties(n, {})
 					});
@@ -346,7 +349,7 @@ export class DocumentParser {
 
 				case "rPr":
 					result.push({
-						target: `${selector} span`,
+						target: `${selector} > p span`,
 						mod: modificator,
 						values: this.parseDefaultProperties(n, {})
 					});
@@ -504,6 +507,10 @@ export class DocumentParser {
 					result.children.push(this.parseRun(el, result));
 					break;
 
+				case "fldSimple":
+					result.children.push(this.parseSimpleField(el, result));
+					break;
+
 				case "hyperlink":
 					result.children.push(this.parseHyperlink(el, result));
 					break;
@@ -587,6 +594,17 @@ export class DocumentParser {
 			paragraph.cssStyle["float"] = "left";
 	}
 
+	parseSimpleField(node: Element, parent?: OpenXmlElement): WmlFieldSimple {
+		return {
+			type: DomType.SimpleField,
+			instruction: xml.attr(node, "instr"),
+			lock: xml.boolAttr(node, "fldLock", false),
+			dirty: xml.boolAttr(node, "dirty", false),
+			parent,
+			children: this.parseParagraph(node).children
+		};
+	}
+
 	parseHyperlink(node: Element, parent?: OpenXmlElement): WmlHyperlink {
 		var result: WmlHyperlink = <WmlHyperlink>{ type: DomType.Hyperlink, parent: parent, children: [] };
 
@@ -595,6 +613,12 @@ export class DocumentParser {
 
 		for (const c of xml.elements(node)) {
 			switch (c.localName) {
+				case "commentRangeStart":
+					result.children.push(new WmlCommentRangeStart(xml.attr(c, "id")));
+					break;
+				case "commentRangeEnd":
+					result.children.push(new WmlCommentRangeEnd(xml.attr(c, "id")));
+					break;
 				case "r":
 					result.children.push(this.parseRun(c, result));
 					break;
@@ -655,12 +679,7 @@ export class DocumentParser {
 					break;
 
 				case "fldSimple":
-					result.children.push(<WmlFieldSimple>{
-						type: DomType.SimpleField,
-						instruction: xml.attr(c, "instr"),
-						lock: xml.boolAttr(c, "lock", false),
-						dirty: xml.boolAttr(c, "dirty", false)
-					});
+					result.children.push(this.parseSimpleField(c, result));
 					break;
 
 				case "instrText":
@@ -1215,6 +1234,8 @@ export class DocumentParser {
 
 	parseDefaultProperties(elem: Element, style: Record<string, string> = null, childStyle: Record<string, string> = null, handler: (prop: Element) => boolean = null): Record<string, string> {
 		style = style || {};
+		const highlight = xml.element(elem, "highlight");
+		const highlightColor = highlight && xml.attr(highlight, "val");
 
 		for (const c of xml.elements(elem)) {
 			if (handler?.(c))
@@ -1238,11 +1259,13 @@ export class DocumentParser {
 					break;
 
 				case "shd":
-					style["background-color"] = xmlUtil.colorAttr(c, "fill", null, autos.shd);
+					if (!highlightColor || highlightColor == "none")
+						style["background-color"] = xmlUtil.colorAttr(c, "fill", null, autos.shd);
 					break;
 
 				case "highlight":
-					style["background-color"] = xmlUtil.colorAttr(c, "val", null, autos.highlight);
+					if (highlightColor != "none" || !xml.element(elem, "shd"))
+						style["background-color"] = xmlUtil.colorAttr(c, "val", null, autos.highlight);
 					break;
 
 				case "vertAlign":
@@ -1768,12 +1791,12 @@ class values {
 		const val = xml.hexAttr(c, "val", 0);
 		let className = "";
 
-		if (xml.boolAttr(c, "firstRow") || (val & 0x0020)) className += " first-row";
-		if (xml.boolAttr(c, "lastRow") || (val & 0x0040)) className += " last-row";
-		if (xml.boolAttr(c, "firstColumn") || (val & 0x0080)) className += " first-col";
-		if (xml.boolAttr(c, "lastColumn") || (val & 0x0100)) className += " last-col";
-		if (xml.boolAttr(c, "noHBand") || (val & 0x0200)) className += " no-hband";
-		if (xml.boolAttr(c, "noVBand") || (val & 0x0400)) className += " no-vband";
+		if (xml.boolAttr(c, "firstRow", !!(val & 0x0020))) className += " first-row";
+		if (xml.boolAttr(c, "lastRow", !!(val & 0x0040))) className += " last-row";
+		if (xml.boolAttr(c, "firstColumn", !!(val & 0x0080))) className += " first-col";
+		if (xml.boolAttr(c, "lastColumn", !!(val & 0x0100))) className += " last-col";
+		if (xml.boolAttr(c, "noHBand", !!(val & 0x0200))) className += " no-hband";
+		if (xml.boolAttr(c, "noVBand", !!(val & 0x0400))) className += " no-vband";
 
 		return className.trim();
 	}

@@ -61,7 +61,7 @@ renderAsync(
         renderFootnotes: true, //enables footnotes rendering
         renderEndnotes: true, //enables endnotes rendering
         renderComments: false, //enables experimental comments rendering
-        renderAltChunks: true, //enables altChunks (html parts) rendering
+        renderAltChunks: true, //renders altChunks (HTML parts) inside inert sandboxed iframes
         exposeParaIds: false, //if true, each rendered paragraph gets a data-para-id attribute with the paragraph's w14:paraId value (when present)
         debug: boolean = false, //enables additional logging
         h: ({ ns, tagName, className, style, children, ...props } | Node | string): Node, //experimental hook for HTML rendering, default implementation - defaultOptions.h
@@ -117,3 +117,11 @@ Please do not include contents of `./dist` folder in your PR's. Otherwise I most
 
 
 Fork releases are published as `@lofcz/docx-preview`. See [Publishing](docs/publishing.md) for the first manual publish and subsequent GitHub Actions releases.
+
+### Fork rendering improvements
+
+Selected fork changes and their sources are recorded in [the fork integration notes](docs/fork-integration-2026-09-21.md). Page-break splitting preserves the parsed document and handles multiple breaks in a paragraph. Simple fields display their cached Word results; page counts are not recalculated.
+
+With `experimental: true`, `renderAsync` measures tabs after attaching the output and waiting for document fonts. Attach `bodyContainer` to the document before calling it. The lower-level `renderDocument` API still returns detached nodes and retains its delayed tab pass for callers that attach those nodes promptly.
+
+HTML altChunks keep `renderAltChunks: true` by default, but their iframes now have an empty sandbox: document-provided scripts, forms and privileged navigation are disabled. Set `renderAltChunks: false` to omit HTML parts entirely.

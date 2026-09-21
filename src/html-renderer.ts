@@ -10,7 +10,7 @@ import {
 import { Options } from './docx-preview';
 import { DocumentElement } from './document/document';
 import { WmlParagraph } from './document/paragraph';
-import { asArray, encloseFontFamily, escapeClassName, isString, keyBy, mergeDeep } from './utils';
+import { asArray, encloseFontFamily, escapeClassName, escapeCssString, isString, keyBy, mergeDeep } from './utils';
 import { computePixelToPoint, updateTabStop } from './javascript';
 import { FontTablePart } from './font-table/font-table';
 import { FooterHeaderReference, SectionProperties } from './document/section';
@@ -47,6 +47,7 @@ export class HtmlRenderer {
 	document: WordDocument;
 	options: Options;
 	styleMap: Record<string, IDomStyle> = {};
+	defaultParagraphStyleName: string;
 	currentPart: Part = null;
 
 	tableVerticalMerges: CellVerticalMergeType[] = [];
@@ -70,13 +71,14 @@ export class HtmlRenderer {
 	postRenderTasks: any[] = [];
 	h = h;
 
-	async render(document: WordDocument, options: Options): Promise<Node[]> {
+	async render(document: WordDocument, options: Options, deferTabStops = false): Promise<Node[]> {
 		this.document = document;
 		this.options = options;
 		this.className = options.className;
 		this.rootSelector = options.inWrapper ? `.${this.className}-wrapper` : ':root';
 		this.h = options.h ?? h;
 		this.styleMap = null;
+		this.defaultParagraphStyleName = null;
 		this.tasks = [];
 
 		if (this.options.renderComments && globalThis.Highlight) {
@@ -132,7 +134,9 @@ export class HtmlRenderer {
 
 		await Promise.allSettled(this.tasks);
 
-		this.refreshTabStops();
+		// Detached renderDocument callers retain the delayed layout pass.
+		if (!deferTabStops && options.experimental)
+			setTimeout(() => void this.refreshTabStops(), 500);
 
 		return result;
 	}
@@ -208,6 +212,8 @@ export class HtmlRenderer {
 			var baseStyle = stylesMap[style.basedOn];
 
 			if (baseStyle) {
+				style.rowBandSize ??= baseStyle.rowBandSize;
+				style.colBandSize ??= baseStyle.colBandSize;
 				style.paragraphProps = mergeDeep(style.paragraphProps, baseStyle.paragraphProps);
 				style.runProps = mergeDeep(style.runProps, baseStyle.runProps);
 
@@ -229,6 +235,7 @@ export class HtmlRenderer {
 			style.cssName = this.processStyleName(style.id);
 		}
 
+		this.defaultParagraphStyleName = styles.find(s => s.target == "p" && s.isDefault && s.id)?.id;
 		return stylesMap;
 	}
 
@@ -258,6 +265,7 @@ export class HtmlRenderer {
 	}
 
 	processTable(table: WmlTable) {
+		this.applyTableConditionalClasses(table);
 		for (var r of table.children) {
 			for (var c of r.children) {
 				c.cssStyle = this.copyStyleProperties(table.cellStyle, c.cssStyle, [
@@ -270,6 +278,45 @@ export class HtmlRenderer {
 		}
 	}
 
+	applyTableConditionalClasses(table: WmlTable) {
+		if (table.className == null) return;
+		const look = new Set(table.className.split(/\s+/));
+		const rows = table.children as WmlTableRow[];
+		const style = this.findStyle(table.styleName);
+		const rowBand = Math.max(1, table.rowBandSize ?? style?.rowBandSize ?? 1);
+		const colBand = Math.max(1, table.colBandSize ?? style?.colBandSize ?? 1);
+		const columnCount = table.columns?.length || Math.max(0, ...rows.map(row =>
+			(row.gridBefore ?? 0) + (row.gridAfter ?? 0) +
+			row.children.reduce((n, cell: WmlTableCell) => n + (cell.span || 1), 0)));
+		let bandRow = 0;
+		rows.forEach((row, index) => {
+			const first = index == 0 && look.has("first-row");
+			const last = index == rows.length - 1 && look.has("last-row");
+			const classes = [];
+			if (first) classes.push("first-row");
+			if (last) classes.push("last-row");
+			if (!first && !last && !look.has("no-hband"))
+				classes.push(Math.floor(bandRow++ / rowBand) % 2 ? "even-row" : "odd-row");
+			// An explicit cnfStyle, even an all-false one, takes precedence.
+			row.className ??= classes.join(" ");
+			let col = row.gridBefore ?? 0;
+			for (const cell of row.children as WmlTableCell[]) {
+				const span = cell.span || 1;
+				const first = col == 0 && look.has("first-col");
+				const last = col + span == columnCount && look.has("last-col");
+				const classes = [];
+				if (first) classes.push("first-col");
+				if (last) classes.push("last-col");
+				if (!first && !last && !look.has("no-vband")) {
+					const offset = col - (look.has("first-col") ? 1 : 0);
+					if (offset >= 0) classes.push(Math.floor(offset / colBand) % 2 ? "even-col" : "odd-col");
+				}
+				cell.className ??= classes.join(" ");
+				col += span;
+			}
+		});
+	}
+
 	copyStyleProperties(input: Record<string, string>, output: Record<string, string>, attrs: string[] = null): Record<string, string> {
 		if (!input)
 			return output;
@@ -278,7 +325,7 @@ export class HtmlRenderer {
 		if (attrs == null) attrs = Object.getOwnPropertyNames(input);
 
 		for (var key of attrs) {
-			if (input.hasOwnProperty(key) && !output.hasOwnProperty(key))
+			if (Object.prototype.hasOwnProperty.call(input, key) && !Object.prototype.hasOwnProperty.call(output, key))
 				output[key] = input[key];
 		}
 
@@ -440,65 +487,56 @@ export class HtmlRenderer {
 		var current: Section = { sectProps: null, elements: [], pageBreak: false };
 		var result = [current];
 
-		for (let elem of elements) {
-			if (elem.type == DomType.Paragraph) {
-				const p = elem as WmlParagraph;
-				const s = this.findStyle(p.styleName);
-
-				const pageBreakBefore = p.pageBreakBefore ?? s?.paragraphProps?.pageBreakBefore;
-				if (this.options.breakPages && pageBreakBefore && current.elements.length > 0) {
-					current.pageBreak = true;
-					current = { sectProps: null, elements: [], pageBreak: false };
-					result.push(current);
-				}
+		// Work on cloned fragments: page breaks must survive a second render of
+		// the same parsed document. Re-scan each tail to handle every break.
+		const pending = elements.slice();
+		for (let i = 0; i < pending.length; i++) {
+			const elem = pending[i];
+			if (elem.type != DomType.Paragraph) {
+				current.elements.push(elem);
+				continue;
 			}
 
-			current.elements.push(elem);
+			const p = elem as WmlParagraph;
+			const style = this.findStyle(this.effectiveParagraphStyleName(p));
+			const before = p.pageBreakBefore ?? style?.paragraphProps?.pageBreakBefore;
+			if (this.options.breakPages && before && current.elements.length > 0) {
+				current.pageBreak = true;
+				result.push(current = { sectProps: null, elements: [], pageBreak: false });
+			}
 
-			if (elem.type == DomType.Paragraph) {
-				const p = elem as WmlParagraph;
+			let breakIndex = -1;
+			const runIndex = this.options.breakPages ? p.children?.findIndex(run => {
+				breakIndex = run.children?.findIndex(e => this.isPageBreakElement(e)) ?? -1;
+				return breakIndex >= 0;
+			}) ?? -1 : -1;
 
-				var sectProps = p.sectionProps;
-				var pBreakIndex = -1;
-				var rBreakIndex = -1;
+			if (runIndex >= 0) {
+				const run = p.children[runIndex];
+				const head: WmlParagraph = { ...p, children: p.children.slice(0, runIndex) };
+				const tail: WmlParagraph = { ...p, pageBreakBefore: false,
+					children: p.children.slice(runIndex + 1) };
+				if (breakIndex > 0)
+					head.children.push({ ...run, children: run.children.slice(0, breakIndex) });
+				if (breakIndex + 1 < run.children.length)
+					tail.children.unshift({ ...run, children: run.children.slice(breakIndex + 1) });
 
-				if (this.options.breakPages && p.children) {
-					pBreakIndex = p.children.findIndex(r => {
-						rBreakIndex = r.children?.findIndex(this.isPageBreakElement.bind(this)) ?? -1;
-						return rBreakIndex != -1;
-					});
+				if (tail.children.length) {
+					if (this.hasRenderableContent(head)) tail.suppressNumbering = true;
+					else head.suppressNumbering = true;
+					// Section properties belong to the paragraph's last fragment.
+					head.sectionProps = null;
+					pending.splice(i + 1, 0, tail);
 				}
-
-				if (sectProps || pBreakIndex != -1) {
-					current.sectProps = sectProps;
-					current.pageBreak = pBreakIndex != -1;
-					current = { sectProps: null, elements: [], pageBreak: false };
-					result.push(current);
-				}
-
-				if (pBreakIndex != -1) {
-					let breakRun = p.children[pBreakIndex];
-					let splitRun = rBreakIndex < breakRun.children.length - 1;
-
-					if (pBreakIndex < p.children.length - 1 || splitRun) {
-						var children = p.children;
-						var newParagraph: WmlParagraph = { ...p, children: children.slice(pBreakIndex) };
-						p.children = children.slice(0, pBreakIndex);
-						current.elements.push(newParagraph);
-
-						if (splitRun || rBreakIndex > 0) {
-							let runChildren = breakRun.children;
-							let newRun = { ...breakRun, children: runChildren.slice(0, rBreakIndex) };
-							p.children.push(newRun);
-							breakRun.children = runChildren.slice(rBreakIndex);
-						}
-
-						if (this.hasRenderableContent(p)) {
-							newParagraph.suppressNumbering = true;
-						} else {
-							p.suppressNumbering = true;
-						}
-					}
+				current.elements.push(head);
+				current.sectProps = head.sectionProps;
+				current.pageBreak = true;
+				result.push(current = { sectProps: null, elements: [], pageBreak: false });
+			} else {
+				current.elements.push(p);
+				if (p.sectionProps) {
+					current.sectProps = p.sectionProps;
+					result.push(current = { sectProps: null, elements: [], pageBreak: false });
 				}
 			}
 		}
@@ -721,9 +759,11 @@ section.${c}>footer { z-index: 1; }
 	renderStyles(styles: IDomStyle[]) {
 		var styleText = "";
 		const stylesMap = this.styleMap;
-		const defautStyles = keyBy(styles.filter(s => s.isDefault), s => s.target);
+		const defautStyles = keyBy(styles.filter(s => s.isDefault && s.id != null), s => s.target);
 
 		for (const style of styles) {
+			if (style.id == null && !style.isDocDefaults)
+				continue;
 			var subStyles = style.styles;
 
 			if (style.linked) {
@@ -736,8 +776,8 @@ section.${c}>footer { z-index: 1; }
 			}
 
 			for (const subStyle of subStyles) {
-				//TODO temporary disable modificators until test it well
-				var selector = `${style.target ?? ''}.${style.cssName}`; //${subStyle.mod ?? ''} 
+				// Conditional table rules are gated by the table look flags.
+				var selector = `${style.target ?? ''}.${style.cssName}${subStyle.mod ?? ''}`;
 
 				if (style.target != subStyle.target)
 					selector += ` ${subStyle.target}`;
@@ -789,6 +829,9 @@ section.${c}>footer { z-index: 1; }
 			case DomType.Hyperlink:
 				return this.renderHyperlink(elem);
 			
+			case DomType.SimpleField:
+				return this.renderElements(elem.children);
+
 			case DomType.SmartTag:
 				return this.renderSmartTag(elem);
 
@@ -952,7 +995,7 @@ section.${c}>footer { z-index: 1; }
 	}
 
 	renderParagraph(elem: WmlParagraph) {
-		const style = this.findStyle(elem.styleName);
+		const style = this.findStyle(this.effectiveParagraphStyleName(elem));
 		elem.tabs ??= style?.paragraphProps?.tabs;
 
 		var result = this.toHTML(elem, ns.html, "p");
@@ -1052,7 +1095,7 @@ section.${c}>footer { z-index: 1; }
 		if (!this.options.renderAltChunks)
 			return null;
 
-		var result = this.h({ tagName: "iframe" }) as HTMLIFrameElement;
+		var result = this.h({ tagName: "iframe", sandbox: "" }) as HTMLIFrameElement;
 		
 		this.tasks.push(this.document.loadAltChunk(elem.id, this.currentPart).then(x => {
 			result.srcdoc = x;
@@ -1175,7 +1218,7 @@ section.${c}>footer { z-index: 1; }
 		let children = this.renderElements(elem.children);
 
 		if (elem.verticalAlign) {
-			children = [this.h({ tagName: elem.verticalAlign, children: this.renderElements(elem.children) })];
+			children = [this.h({ tagName: elem.verticalAlign, children })];
 		}
 
 		const result = this.toHTML(elem, ns.html, "span", children);
@@ -1396,7 +1439,9 @@ section.${c}>footer { z-index: 1; }
 
 	toH(elem: OpenXmlElement, ns: ns, tagName: string, children: Node[] = null) {
 		const { "$lang": lang, ...style } = elem.cssStyle ?? {};
-		const className = cx(elem.className, elem.styleName && this.processStyleName(elem.styleName));
+		const styleName = elem.type == DomType.Paragraph
+			? this.effectiveParagraphStyleName(elem as WmlParagraph) : elem.styleName;
+		const className = cx(elem.className, styleName && this.processStyleName(styleName));
 		return { ns, tagName, className, lang, style, children: children ?? this.renderElements(elem.children) } as any;
 	}
 
@@ -1406,6 +1451,10 @@ section.${c}>footer { z-index: 1; }
 
 	findStyle(styleName: string) {
 		return styleName && this.styleMap?.[styleName];
+	}
+
+	effectiveParagraphStyleName(p: WmlParagraph): string {
+		return p.styleName ?? this.defaultParagraphStyleName;
 	}
 
 	numberingClass(id: string, lvl: number) {
@@ -1446,7 +1495,7 @@ section.${c}>footer { z-index: 1; }
 			"space": "\\a0",
 		};
 
-		var result = text.replace(/%[1-9]/g, s => {
+		var result = escapeCssString(text).replace(/%[1-9]/g, s => {
 			let lvl = parseInt(s.substring(1), 10) - 1;
 			const format = levels.find(l => l.id == id && l.level == lvl)?.format;
 			if (!format || format == "bullet" || format == "none")
@@ -1500,20 +1549,23 @@ section.${c}>footer { z-index: 1; }
 			taiwaneseDigital:  "cjk-decimal",
 		};
 
-		return mapping[format] ?? format;
+		return Object.prototype.hasOwnProperty.call(mapping, format) ? mapping[format]
+			: (/^[a-zA-Z][a-zA-Z0-9-]*$/.test(format) ? format : "decimal");
 	}
 
-	refreshTabStops() {
-		if (!this.options.experimental)
+	async refreshTabStops() {
+		if (!this.options.experimental || !this.currentTabs.some(t => t.span.isConnected))
 			return;
 
-		setTimeout(() => {
-			const pixelToPoint = computePixelToPoint();
-
-			for (let tab of this.currentTabs) {
+		// Trigger layout before waiting: fonts are requested when text is laid out.
+		this.currentTabs.find(t => t.span.isConnected).span.getBoundingClientRect();
+		await document.fonts?.ready;
+		const pixelToPoint = computePixelToPoint();
+		// Earlier tabs move later tabs in the same paragraph; measure sequentially.
+		for (const tab of this.currentTabs) {
+			if (tab.span.isConnected)
 				updateTabStop(tab.span, tab.stops, this.defaultTabSize, pixelToPoint);
-			}
-		}, 500);
+		}
 	}
 
 	createElementNS(ns: any, tagName: string, props?: Partial<Record<any, any>>, children?: any[]) {

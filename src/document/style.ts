@@ -9,6 +9,9 @@ export interface IDomStyle {
     target: string;
     basedOn?: string;
     isDefault?: boolean;
+    isDocDefaults?: boolean;
+    rowBandSize?: number;
+    colBandSize?: number;
     styles: IDomSubStyle[];
     linked?: string;
     next?: string;

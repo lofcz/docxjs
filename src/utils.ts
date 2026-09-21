@@ -2,6 +2,10 @@ export function escapeClassName(className: string) {
 	return className?.replace(/[ .]+/g, '-').replace(/[&]+/g, 'and').toLowerCase();
 }
 
+export function escapeCssString(value: string): string {
+    return value.replace(/[\\"\n\r\f\0]/g, c => `\\${c.charCodeAt(0).toString(16)} `);
+}
+
 export function encloseFontFamily(fontFamily: string): string {
     return /^[^"'].*\s.*[^"']$/.test(fontFamily) ? `'${fontFamily}'` : fontFamily;
 }
@@ -28,7 +32,7 @@ export function keyBy<T = any>(array: T[], by: (x: T) => any): Record<any, T> {
     return array.reduce((a, x) => {
         a[by(x)] = x;
         return a;
-    }, {});
+    }, Object.create(null));
 }
 
 export function blobToBase64(blob: Blob): Promise<string> {
@@ -55,7 +59,8 @@ export function mergeDeep(target, ...sources) {
     const source = sources.shift();
 
     if (isObject(target) && isObject(source)) {
-        for (const key in source) {
+        for (const key of Object.keys(source)) {
+            if (["__proto__", "constructor", "prototype"].includes(key)) continue;
             if (isObject(source[key])) {
                 const val = target[key] ?? (target[key] = {});
                 mergeDeep(val, source[key]);

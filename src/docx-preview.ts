@@ -64,7 +64,8 @@ export async function renderDocument(document: any, userOptions?: Partial<Option
 
 export async function renderAsync(data: Blob | any, bodyContainer: HTMLElement, styleContainer?: HTMLElement, userOptions?: Partial<Options>): Promise<any> {
 	const doc = await parseAsync(data, userOptions);
-	const nodes = await renderDocument(doc, userOptions);
+	const renderer = new HtmlRenderer();
+	const nodes = await renderer.render(doc, { ...defaultOptions, ...userOptions }, true);
 
     styleContainer ??= bodyContainer;
     styleContainer.innerHTML = "";
@@ -75,5 +76,6 @@ export async function renderAsync(data: Blob | any, bodyContainer: HTMLElement, 
         c.appendChild(n);
     }
     
+    await renderer.refreshTabStops();
     return doc;
 }
