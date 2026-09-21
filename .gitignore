@@ -9,3 +9,4 @@ docx.js.map
 
 !package-lock.json
 *.tgz
+/dist
