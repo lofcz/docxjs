@@ -37,7 +37,7 @@ Run **Release and Publish to npm** in GitHub Actions on `master`, choosing `patc
 gh workflow run release.yml --repo lofcz/docxjs --ref master -f release_type=patch
 ```
 
-The workflow uses Node.js 24 and npm 11.19.0, installs with `npm ci`, bumps both manifests, builds and tests, then commits the manifests and generated `dist` files. It pushes that commit and its annotated tag atomically before publishing with OIDC and creating a GitHub release. Only one release runs at a time. No npm token secret is required; `id-token: write` enables [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/).
+The workflow uses Node.js 24 and npm 11.19.0, installs with `npm ci`, bumps both manifests, builds and tests, then commits only the version manifests. Generated `dist` files are ignored by Git and included in the npm package via its `files` allowlist. The build emits the public declaration from `types/docx-preview.d.ts`. It pushes that commit and its annotated tag atomically before publishing with OIDC and creating a GitHub release. Only one release runs at a time. No npm token secret is required; `id-token: write` enables [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/).
 
 If npm publication fails after the commit/tag push, fix the cause and dispatch `release_type=current` while `master` still points at that release commit. This retries the same version. Never move a published version's tag. If npm publication succeeded but GitHub release creation failed, create only the missing GitHub release:
 

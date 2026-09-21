@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import typescript from '@rollup/plugin-typescript';
 import terser from '@rollup/plugin-terser';
 
@@ -25,7 +26,16 @@ export default args => {
 	const config = {
 		input: 'src/docx-preview.ts',
 		output: [umdOutput],
-		plugins: [typescript()]
+		plugins: [typescript(), {
+			name: 'public-types',
+			generateBundle() {
+				this.emitFile({
+					type: 'asset',
+					fileName: 'docx-preview.d.ts',
+					source: readFileSync(new URL('./types/docx-preview.d.ts', import.meta.url), 'utf8')
+				});
+			}
+		}]
 	}
 
 	if (args.environment == 'BUILD:production')
