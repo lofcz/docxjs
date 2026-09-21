@@ -33,6 +33,7 @@ export interface Options {
     renderChanges: boolean;
     renderComments: boolean;
     renderAltChunks: boolean;
+    exposeParaIds: boolean;
     h: (elemOrText: HElement | Node | string) => Node; //experimental, subject to change
 }
 

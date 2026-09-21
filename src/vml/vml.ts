@@ -80,12 +80,18 @@ export function parseVmlElement(elem: Element, parser: DocumentParser): VmlEleme
 				break;
 
 			case "imagedata":
+				if (!xml.attr(el, "id"))
+					break;
 				result.tagName = "image";
 				Object.assign(result.attrs, { width: '100%', height: '100%' });
 				result.imageHref = {
 					id: xml.attr(el, "id"),
 					title: xml.attr(el, "title"),
 				}
+				break;
+
+			case "wrap":
+				result.wrapType = xml.attr(el, "type");
 				break;
 
 			case "txbxContent": 

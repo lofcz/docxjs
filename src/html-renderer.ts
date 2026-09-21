@@ -371,7 +371,7 @@ export class HtmlRenderer {
 		if (!refs) return;
 
 		var ref = (props.titlePage && firstOfSection ? refs.find(x => x.type == "first") : null)
-			?? (page % 2 == 1 ? refs.find(x => x.type == "even") : null)
+			?? (page % 2 == 1 && this.document.settingsPart?.settings?.evenAndOddHeaders ? refs.find(x => x.type == "even") : null)
 			?? refs.find(x => x.type == "default");
 
 		var part = ref && this.document.findPartByRelId(ref.id, this.document.documentPart) as BaseHeaderFooterPart;
@@ -409,6 +409,24 @@ export class HtmlRenderer {
 		return (elem as WmlBreak).break == "page";
 	}
 
+	hasRenderableContent(elem: OpenXmlElement): boolean {
+		if ((elem.type == DomType.Deleted || elem.type == DomType.DeletedText) && !this.options.renderChanges)
+			return false;
+
+		if (elem.type == DomType.Text || elem.type == DomType.DeletedText)
+			return !!(elem as WmlText).text;
+
+		if ([DomType.Break, DomType.BookmarkStart, DomType.BookmarkEnd,
+			DomType.CommentRangeStart, DomType.CommentRangeEnd,
+			DomType.Instruction, DomType.ComplexField].includes(elem.type))
+			return false;
+
+		if (elem.children?.length)
+			return elem.children.some(c => this.hasRenderableContent(c));
+
+		return elem.type != DomType.Paragraph && elem.type != DomType.Run;
+	}
+
 	isPageBreakSection(prev: SectionProperties, next: SectionProperties): boolean {
 		if (!prev) return false;
 		if (!next) return false;
@@ -424,10 +442,11 @@ export class HtmlRenderer {
 
 		for (let elem of elements) {
 			if (elem.type == DomType.Paragraph) {
-				const s = this.findStyle((elem as WmlParagraph).styleName);
+				const p = elem as WmlParagraph;
+				const s = this.findStyle(p.styleName);
 
-				if (s?.paragraphProps?.pageBreakBefore) {
-					current.sectProps = sectProps;
+				const pageBreakBefore = p.pageBreakBefore ?? s?.paragraphProps?.pageBreakBefore;
+				if (this.options.breakPages && pageBreakBefore && current.elements.length > 0) {
 					current.pageBreak = true;
 					current = { sectProps: null, elements: [], pageBreak: false };
 					result.push(current);
@@ -462,16 +481,22 @@ export class HtmlRenderer {
 					let splitRun = rBreakIndex < breakRun.children.length - 1;
 
 					if (pBreakIndex < p.children.length - 1 || splitRun) {
-						var children = elem.children;
-						var newParagraph = { ...elem, children: children.slice(pBreakIndex) };
-						elem.children = children.slice(0, pBreakIndex);
+						var children = p.children;
+						var newParagraph: WmlParagraph = { ...p, children: children.slice(pBreakIndex) };
+						p.children = children.slice(0, pBreakIndex);
 						current.elements.push(newParagraph);
 
-						if (splitRun) {
+						if (splitRun || rBreakIndex > 0) {
 							let runChildren = breakRun.children;
 							let newRun = { ...breakRun, children: runChildren.slice(0, rBreakIndex) };
-							elem.children.push(newRun);
+							p.children.push(newRun);
 							breakRun.children = runChildren.slice(rBreakIndex);
+						}
+
+						if (this.hasRenderableContent(p)) {
+							newParagraph.suppressNumbering = true;
+						} else {
+							p.suppressNumbering = true;
 						}
 					}
 				}
@@ -649,7 +674,7 @@ section.${c}>footer { z-index: 1; }
 				resetCounters.push(counterReset);
 
 				styleText += this.styleToString(`${selector}:before`, {
-					"content": this.levelTextToContent(num.levelText, num.suff, num.id, this.numFormatToCssValue(num.format)),
+					"content": this.levelTextToContent(num.levelText, num.suff, num.id, numberings),
 					"counter-increment": counter,
 					...num.rStyle,
 				});
@@ -669,6 +694,21 @@ section.${c}>footer { z-index: 1; }
 		if (resetCounters.length > 0) {
 			styleText += this.styleToString(this.rootSelector, {
 				"counter-reset": resetCounters.join(" ")
+			});
+		}
+
+		if (numberings.length > 0) {
+			const suppressedSelector = `p.${this.numberingSuppressedClass()}`;
+
+			styleText += this.styleToString(suppressedSelector, {
+				"counter-set": "none",
+				// list items keep incrementing the implicit list-item counter even with a hidden marker
+				"counter-increment": "list-item 0",
+				"list-style-type": "none",
+			});
+			styleText += this.styleToString(`${suppressedSelector}:before`, {
+				"content": "none",
+				"counter-increment": "none",
 			});
 		}
 
@@ -793,7 +833,9 @@ section.${c}>footer { z-index: 1; }
 				return this.renderEndnoteReference(elem as WmlNoteReference);
 
 			case DomType.NoBreakHyphen:
-				return this.h({ tagName: "wbr" });
+				// a non-breaking hyphen is a visible hyphen that forbids a break;
+				// <wbr> is an invisible break opportunity - the opposite on both counts
+				return this.h("\u2011");
 
 			case DomType.VmlPicture:
 				return this.renderVmlPicture(elem);
@@ -910,15 +952,23 @@ section.${c}>footer { z-index: 1; }
 	}
 
 	renderParagraph(elem: WmlParagraph) {
+		const style = this.findStyle(elem.styleName);
+		elem.tabs ??= style?.paragraphProps?.tabs;
+
 		var result = this.toHTML(elem, ns.html, "p");
 
-		const style = this.findStyle(elem.styleName);
-		elem.tabs ??= style?.paragraphProps?.tabs;  //TODO
+		if (this.options.exposeParaIds && elem.paraId) {
+			result.setAttribute("data-para-id", elem.paraId);
+		}
 
 		const numbering = elem.numbering ?? style?.paragraphProps?.numbering;
 
 		if (numbering) {
 			result.classList.add(this.numberingClass(numbering.id, numbering.level));
+
+			if (elem.suppressNumbering) {
+				result.classList.add(this.numberingSuppressedClass());
+			}
 		}
 
 		return result;
@@ -936,6 +986,10 @@ section.${c}>footer { z-index: 1; }
 		if (elem.anchor) {
 			res.href += `#${elem.anchor}`;
 		}
+
+		// Validate before calling the configurable element factory.
+		if (!res.href || !(/^(?:#|https?:|mailto:)/i.test(res.href)))
+			delete res.href;
 
 		return this.h(res);
 	}
@@ -1068,9 +1122,20 @@ section.${c}>footer { z-index: 1; }
 	}
 
 	renderChange(elem: WmlChange, tag: string) {
-		return this.renderContainer(elem, tag as any, {
-			dateTime: elem.date		
+		const result = this.renderContainer(elem, tag as any, {
+			dateTime: elem.date
 		});
+
+		// Surface <w:ins>/<w:del> revision metadata so consumers can read the
+		// change author/date/id off the rendered element (e.g. attribution UI).
+		if (elem.author)
+			result.setAttribute("data-change-author", elem.author);
+		if (elem.date)
+			result.setAttribute("data-change-date", elem.date);
+		if (elem.id)
+			result.setAttribute("data-change-id", elem.id);
+
+		return result;
 	}
 
 	renderSymbol(elem: WmlSymbol) {
@@ -1367,19 +1432,26 @@ section.${c}>footer { z-index: 1; }
 		return result + "}\r\n";
 	}
 
+	numberingSuppressedClass() {
+		return `${this.className}-numbering-suppressed`;
+	}
+
 	numberingCounter(id: string, lvl: number) {
 		return `${this.className}-num-${id}-${lvl}`;
 	}
 
-	levelTextToContent(text: string, suff: string, id: string, numformat: string) {
+	levelTextToContent(text: string, suff: string, id: string, levels: IDomNumbering[]) {
 		const suffMap = {
 			"tab": "\\9",
 			"space": "\\a0",
 		};
 
-		var result = text.replace(/%\d*/g, s => {
+		var result = text.replace(/%[1-9]/g, s => {
 			let lvl = parseInt(s.substring(1), 10) - 1;
-			return `"counter(${this.numberingCounter(id, lvl)}, ${numformat})"`;
+			const format = levels.find(l => l.id == id && l.level == lvl)?.format;
+			if (!format || format == "bullet" || format == "none")
+				return "";
+			return `"counter(${this.numberingCounter(id, lvl)}, ${this.numFormatToCssValue(format)})"`;
 		});
 
 		return `"${result}${suffMap[suff] ?? ""}"`;

@@ -492,6 +492,7 @@ export class DocumentParser {
 
 	parseParagraph(node: Element): OpenXmlElement {
 		var result = <WmlParagraph>{ type: DomType.Paragraph, children: [] };
+		result.paraId = xml.attr(node, "paraId");
 
 		for (let el of xml.elements(node)) {
 			switch (el.localName) {
@@ -823,10 +824,10 @@ export class DocumentParser {
 			var namespaceURI = elem.lookupNamespaceURI(requires);
 
 			if (supportedNamespaceURIs.includes(namespaceURI))
-				return choice.firstElementChild;
+				return choice.firstElementChild ?? elem;
 		}
 
-		return xml.element(elem, "Fallback")?.firstElementChild;
+		return xml.element(elem, "Fallback")?.firstElementChild ?? elem;
 	}
 
 	parseDrawing(node: Element): OpenXmlElement {
@@ -1125,6 +1126,12 @@ export class DocumentParser {
 					row.gridAfter = xml.intAttr(c, "val");
 					break;
 
+				case "jc":
+					// Row-level horizontal alignment positions the row within the
+					// table; it must NOT become a text-align on the <tr> (CSS
+					// inheritance would center every cell). See issue #215.
+					return true;
+
 				default:
 					return false;
 			}
@@ -1260,7 +1267,14 @@ export class DocumentParser {
 					break;
 
 				case "strike":
-					style["text-decoration"] = xml.boolAttr(c, "val", true) ? "line-through" : "none"
+					//w:strike and w:u share text-decoration - merge with an underline instead of overwriting it
+					if (xml.boolAttr(c, "val", true)) {
+						let prev = style["text-decoration"];
+						style["text-decoration"] = prev && prev != "none" ? `${prev} line-through` : "line-through";
+					} else {
+						let kept = style["text-decoration"]?.split(" ").filter(x => x != "line-through").join(" ");
+						style["text-decoration"] = kept || "none";
+					}
 					break;
 
 				case "b":
@@ -1279,14 +1293,44 @@ export class DocumentParser {
 					style["font-variant"] = xml.boolAttr(c, "val", true) ? "small-caps" : "none";
 					break;
 
-				case "u":
+				case "u": {
+					//same sharing in the other direction - keep a line-through the strike already set
+					let prev = style["text-decoration"];
 					this.parseUnderline(c, style);
+					if (prev?.includes("line-through")) {
+						let val = style["text-decoration"];
+						if (val?.startsWith("underline"))
+							style["text-decoration"] = `line-through ${val}`;
+						else if (val == "none")
+							style["text-decoration"] = "line-through";
+					}
 					break;
+				}
 
 				case "ind":
-				case "tblInd":
 					this.parseIndentation(c, style);
 					break;
+
+				case "tblInd": {
+					//w:tblInd carries its length in w:w/w:type, not the left/right attributes
+					//parseIndentation reads, so a table indent used to parse to nothing
+					const type = xml.attr(c, "type");
+					const alignment = xml.elementAttr(elem, "jc", "val");
+					if ((type && type != "dxa") || (alignment && alignment != "left" && alignment != "start"))
+						break;
+					let tblInd = xml.lengthAttr(c, "w");
+					if (tblInd && parseFloat(tblInd) != 0) {
+						//Word measures tblInd to the first cell's TEXT: the visual edge sits at
+						//tblInd minus the table-level left cell margin (read off the sibling
+						//tblCellMar so parse order cannot matter)
+						let cellMar = xml.element(elem, "tblCellMar");
+						let cellMarLeftEl = cellMar && (xml.element(cellMar, "start") ?? xml.element(cellMar, "left"));
+						let cellMarLeft = cellMarLeftEl && xml.lengthAttr(cellMarLeftEl, "w");
+						style["margin-inline-start"] = cellMarLeft && parseFloat(cellMarLeft) != 0
+							? `calc(${tblInd} - ${cellMarLeft})` : tblInd;
+					}
+					break;
+				}
 
 				case "rFonts":
 					this.parseFont(c, style);

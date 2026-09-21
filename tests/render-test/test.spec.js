@@ -10,7 +10,14 @@ describe("Render document", function () {
     'line-spacing',
     'header-footer',
     'footnote',
-    'equation'
+    'equation',
+    'header-footer-even-odd',
+    'header-footer-even-odd-off',
+    'row-jc',
+    'page-break-before',
+    'alternate-content-empty-fallback',
+    'table-indent',
+    'strike-underline'
   ];
 
   for (let path of tests) {

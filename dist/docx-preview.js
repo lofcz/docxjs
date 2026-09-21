@@ -1027,6 +1027,9 @@
                 case "autoHyphenation":
                     result.autoHyphenation = xml.boolAttr(el, "val");
                     break;
+                case "evenAndOddHeaders":
+                    result.evenAndOddHeaders = xml.boolAttr(el, "val", true);
+                    break;
             }
         }
         return result;
@@ -1324,12 +1327,17 @@
                     Object.assign(result.attrs, parseFill());
                     break;
                 case "imagedata":
+                    if (!globalXmlParser.attr(el, "id"))
+                        break;
                     result.tagName = "image";
                     Object.assign(result.attrs, { width: '100%', height: '100%' });
                     result.imageHref = {
                         id: globalXmlParser.attr(el, "id"),
                         title: globalXmlParser.attr(el, "title"),
                     };
+                    break;
+                case "wrap":
+                    result.wrapType = globalXmlParser.attr(el, "type");
                     break;
                 case "txbxContent":
                     result.children.push(...parser.parseBodyElements(el));
@@ -1780,6 +1788,7 @@
         }
         parseParagraph(node) {
             var result = { type: DomType.Paragraph, children: [] };
+            result.paraId = globalXmlParser.attr(node, "paraId");
             for (let el of globalXmlParser.elements(node)) {
                 switch (el.localName) {
                     case "pPr":
@@ -2055,9 +2064,9 @@
                 var requires = globalXmlParser.attr(choice, "Requires");
                 var namespaceURI = elem.lookupNamespaceURI(requires);
                 if (supportedNamespaceURIs.includes(namespaceURI))
-                    return choice.firstElementChild;
+                    return choice.firstElementChild ?? elem;
             }
-            return globalXmlParser.element(elem, "Fallback")?.firstElementChild;
+            return globalXmlParser.element(elem, "Fallback")?.firstElementChild ?? elem;
         }
         parseDrawing(node) {
             for (var n of globalXmlParser.elements(node)) {
@@ -2289,6 +2298,8 @@
                     case "gridAfter":
                         row.gridAfter = globalXmlParser.intAttr(c, "val");
                         break;
+                    case "jc":
+                        return true;
                     default:
                         return false;
                 }
@@ -2394,7 +2405,14 @@
                         this.parseTrHeight(c, style);
                         break;
                     case "strike":
-                        style["text-decoration"] = globalXmlParser.boolAttr(c, "val", true) ? "line-through" : "none";
+                        if (globalXmlParser.boolAttr(c, "val", true)) {
+                            let prev = style["text-decoration"];
+                            style["text-decoration"] = prev && prev != "none" ? `${prev} line-through` : "line-through";
+                        }
+                        else {
+                            let kept = style["text-decoration"]?.split(" ").filter(x => x != "line-through").join(" ");
+                            style["text-decoration"] = kept || "none";
+                        }
                         break;
                     case "b":
                         style["font-weight"] = globalXmlParser.boolAttr(c, "val", true) ? "bold" : "normal";
@@ -2408,13 +2426,36 @@
                     case "smallCaps":
                         style["font-variant"] = globalXmlParser.boolAttr(c, "val", true) ? "small-caps" : "none";
                         break;
-                    case "u":
+                    case "u": {
+                        let prev = style["text-decoration"];
                         this.parseUnderline(c, style);
+                        if (prev?.includes("line-through")) {
+                            let val = style["text-decoration"];
+                            if (val?.startsWith("underline"))
+                                style["text-decoration"] = `line-through ${val}`;
+                            else if (val == "none")
+                                style["text-decoration"] = "line-through";
+                        }
                         break;
+                    }
                     case "ind":
-                    case "tblInd":
                         this.parseIndentation(c, style);
                         break;
+                    case "tblInd": {
+                        const type = globalXmlParser.attr(c, "type");
+                        const alignment = globalXmlParser.elementAttr(elem, "jc", "val");
+                        if ((type && type != "dxa") || (alignment && alignment != "left" && alignment != "start"))
+                            break;
+                        let tblInd = globalXmlParser.lengthAttr(c, "w");
+                        if (tblInd && parseFloat(tblInd) != 0) {
+                            let cellMar = globalXmlParser.element(elem, "tblCellMar");
+                            let cellMarLeftEl = cellMar && (globalXmlParser.element(cellMar, "start") ?? globalXmlParser.element(cellMar, "left"));
+                            let cellMarLeft = cellMarLeftEl && globalXmlParser.lengthAttr(cellMarLeftEl, "w");
+                            style["margin-inline-start"] = cellMarLeft && parseFloat(cellMarLeft) != 0
+                                ? `calc(${tblInd} - ${cellMarLeft})` : tblInd;
+                        }
+                        break;
+                    }
                     case "rFonts":
                         this.parseFont(c, style);
                         break;
@@ -2817,7 +2858,7 @@
             }
         }
         const marginLeft = parseFloat(pcs.marginLeft);
-        const pOffset = pbb.left + marginLeft;
+        const pOffset = pbb.left - marginLeft;
         const left = (ebb.left - pOffset) * pixelToPoint;
         const tab = tabStops.find(t => t.style != "clear" && t.pos > left);
         if (tab == null)
@@ -2874,8 +2915,11 @@
         if (elem instanceof Node)
             return elem;
         const { ns, tagName, className, style, children, ...props } = elem;
-        if (tagName === "#fragment")
-            return document.createDocumentFragment();
+        if (tagName === "#fragment") {
+            const fragment = document.createDocumentFragment();
+            children?.forEach(child => fragment.appendChild(h(child)));
+            return fragment;
+        }
         if (tagName === "#comment")
             return document.createComment(children[0]);
         const result = (ns ? document.createElementNS(ns, tagName) : document.createElement(tagName));
@@ -3158,7 +3202,7 @@
             if (!refs)
                 return;
             var ref = (props.titlePage && firstOfSection ? refs.find(x => x.type == "first") : null)
-                ?? (page % 2 == 1 ? refs.find(x => x.type == "even") : null)
+                ?? (page % 2 == 1 && this.document.settingsPart?.settings?.evenAndOddHeaders ? refs.find(x => x.type == "even") : null)
                 ?? refs.find(x => x.type == "default");
             var part = ref && this.document.findPartByRelId(ref.id, this.document.documentPart);
             if (part) {
@@ -3188,6 +3232,19 @@
                 return !this.options.ignoreLastRenderedPageBreak;
             return elem.break == "page";
         }
+        hasRenderableContent(elem) {
+            if ((elem.type == DomType.Deleted || elem.type == DomType.DeletedText) && !this.options.renderChanges)
+                return false;
+            if (elem.type == DomType.Text || elem.type == DomType.DeletedText)
+                return !!elem.text;
+            if ([DomType.Break, DomType.BookmarkStart, DomType.BookmarkEnd,
+                DomType.CommentRangeStart, DomType.CommentRangeEnd,
+                DomType.Instruction, DomType.ComplexField].includes(elem.type))
+                return false;
+            if (elem.children?.length)
+                return elem.children.some(c => this.hasRenderableContent(c));
+            return elem.type != DomType.Paragraph && elem.type != DomType.Run;
+        }
         isPageBreakSection(prev, next) {
             if (!prev)
                 return false;
@@ -3202,9 +3259,10 @@
             var result = [current];
             for (let elem of elements) {
                 if (elem.type == DomType.Paragraph) {
-                    const s = this.findStyle(elem.styleName);
-                    if (s?.paragraphProps?.pageBreakBefore) {
-                        current.sectProps = sectProps;
+                    const p = elem;
+                    const s = this.findStyle(p.styleName);
+                    const pageBreakBefore = p.pageBreakBefore ?? s?.paragraphProps?.pageBreakBefore;
+                    if (this.options.breakPages && pageBreakBefore && current.elements.length > 0) {
                         current.pageBreak = true;
                         current = { sectProps: null, elements: [], pageBreak: false };
                         result.push(current);
@@ -3232,15 +3290,21 @@
                         let breakRun = p.children[pBreakIndex];
                         let splitRun = rBreakIndex < breakRun.children.length - 1;
                         if (pBreakIndex < p.children.length - 1 || splitRun) {
-                            var children = elem.children;
-                            var newParagraph = { ...elem, children: children.slice(pBreakIndex) };
-                            elem.children = children.slice(0, pBreakIndex);
+                            var children = p.children;
+                            var newParagraph = { ...p, children: children.slice(pBreakIndex) };
+                            p.children = children.slice(0, pBreakIndex);
                             current.elements.push(newParagraph);
-                            if (splitRun) {
+                            if (splitRun || rBreakIndex > 0) {
                                 let runChildren = breakRun.children;
                                 let newRun = { ...breakRun, children: runChildren.slice(0, rBreakIndex) };
-                                elem.children.push(newRun);
+                                p.children.push(newRun);
                                 breakRun.children = runChildren.slice(rBreakIndex);
+                            }
+                            if (this.hasRenderableContent(p)) {
+                                newParagraph.suppressNumbering = true;
+                            }
+                            else {
+                                p.suppressNumbering = true;
                             }
                         }
                     }
@@ -3337,7 +3401,7 @@ section.${c}>footer { z-index: 1; }
                     }
                     resetCounters.push(counterReset);
                     styleText += this.styleToString(`${selector}:before`, {
-                        "content": this.levelTextToContent(num.levelText, num.suff, num.id, this.numFormatToCssValue(num.format)),
+                        "content": this.levelTextToContent(num.levelText, num.suff, num.id, numberings),
                         "counter-increment": counter,
                         ...num.rStyle,
                     });
@@ -3355,6 +3419,18 @@ section.${c}>footer { z-index: 1; }
             if (resetCounters.length > 0) {
                 styleText += this.styleToString(this.rootSelector, {
                     "counter-reset": resetCounters.join(" ")
+                });
+            }
+            if (numberings.length > 0) {
+                const suppressedSelector = `p.${this.numberingSuppressedClass()}`;
+                styleText += this.styleToString(suppressedSelector, {
+                    "counter-set": "none",
+                    "counter-increment": "list-item 0",
+                    "list-style-type": "none",
+                });
+                styleText += this.styleToString(`${suppressedSelector}:before`, {
+                    "content": "none",
+                    "counter-increment": "none",
                 });
             }
             return [
@@ -3443,7 +3519,7 @@ section.${c}>footer { z-index: 1; }
                 case DomType.EndnoteReference:
                     return this.renderEndnoteReference(elem);
                 case DomType.NoBreakHyphen:
-                    return this.h({ tagName: "wbr" });
+                    return this.h("\u2011");
                 case DomType.VmlPicture:
                     return this.renderVmlPicture(elem);
                 case DomType.VmlElement:
@@ -3524,12 +3600,18 @@ section.${c}>footer { z-index: 1; }
             return this.h({ ns, tagName, children: this.renderElements(elem.children), ...props });
         }
         renderParagraph(elem) {
-            var result = this.toHTML(elem, ns.html, "p");
             const style = this.findStyle(elem.styleName);
             elem.tabs ?? (elem.tabs = style?.paragraphProps?.tabs);
+            var result = this.toHTML(elem, ns.html, "p");
+            if (this.options.exposeParaIds && elem.paraId) {
+                result.setAttribute("data-para-id", elem.paraId);
+            }
             const numbering = elem.numbering ?? style?.paragraphProps?.numbering;
             if (numbering) {
                 result.classList.add(this.numberingClass(numbering.id, numbering.level));
+                if (elem.suppressNumbering) {
+                    result.classList.add(this.numberingSuppressedClass());
+                }
             }
             return result;
         }
@@ -3543,6 +3625,8 @@ section.${c}>footer { z-index: 1; }
             if (elem.anchor) {
                 res.href += `#${elem.anchor}`;
             }
+            if (!res.href || !(/^(?:#|https?:|mailto:)/i.test(res.href)))
+                delete res.href;
             return this.h(res);
         }
         renderSmartTag(elem) {
@@ -3640,9 +3724,16 @@ section.${c}>footer { z-index: 1; }
             return null;
         }
         renderChange(elem, tag) {
-            return this.renderContainer(elem, tag, {
+            const result = this.renderContainer(elem, tag, {
                 dateTime: elem.date
             });
+            if (elem.author)
+                result.setAttribute("data-change-author", elem.author);
+            if (elem.date)
+                result.setAttribute("data-change-date", elem.date);
+            if (elem.id)
+                result.setAttribute("data-change-id", elem.id);
+            return result;
         }
         renderSymbol(elem) {
             return this.h({ tagName: "span", children: [String.fromCharCode(elem.char)], style: { fontFamily: elem.font } });
@@ -3869,17 +3960,23 @@ section.${c}>footer { z-index: 1; }
                 result += cssText;
             return result + "}\r\n";
         }
+        numberingSuppressedClass() {
+            return `${this.className}-numbering-suppressed`;
+        }
         numberingCounter(id, lvl) {
             return `${this.className}-num-${id}-${lvl}`;
         }
-        levelTextToContent(text, suff, id, numformat) {
+        levelTextToContent(text, suff, id, levels) {
             const suffMap = {
                 "tab": "\\9",
                 "space": "\\a0",
             };
-            var result = text.replace(/%\d*/g, s => {
+            var result = text.replace(/%[1-9]/g, s => {
                 let lvl = parseInt(s.substring(1), 10) - 1;
-                return `"counter(${this.numberingCounter(id, lvl)}, ${numformat})"`;
+                const format = levels.find(l => l.id == id && l.level == lvl)?.format;
+                if (!format || format == "bullet" || format == "none")
+                    return "";
+                return `"counter(${this.numberingCounter(id, lvl)}, ${this.numFormatToCssValue(format)})"`;
             });
             return `"${result}${suffMap[suff] ?? ""}"`;
         }
@@ -3975,6 +4072,7 @@ section.${c}>footer { z-index: 1; }
         renderChanges: false,
         renderComments: false,
         renderAltChunks: true,
+        exposeParaIds: false,
         h: h
     };
     function parseAsync(data, userOptions) {

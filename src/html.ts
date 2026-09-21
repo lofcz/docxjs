@@ -20,7 +20,11 @@ export function h(elem: HElement | Node | string) {
 
     const { ns, tagName, className, style, children, ...props } = elem;
 
-    if (tagName === "#fragment") return document.createDocumentFragment();
+    if (tagName === "#fragment") {
+        const fragment = document.createDocumentFragment();
+        children?.forEach(child => fragment.appendChild(h(child)));
+        return fragment;
+    }
     if (tagName === "#comment") return document.createComment(children[0] as string);
     const result = (ns ? document.createElementNS(ns, tagName) : document.createElement(tagName)) as HTMLElement | SVGElement | MathMLElement;
     if (className) result.setAttribute("class", className);
