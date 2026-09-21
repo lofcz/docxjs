@@ -39,7 +39,7 @@ gh workflow run release.yml --repo lofcz/docxjs --ref master -f release_type=pat
 
 The workflow uses Node.js 24 and npm 11.19.0, installs with `npm ci`, bumps both manifests, builds and tests, then commits only the version manifests. Generated `dist` files are ignored by Git and included in the npm package via its `files` allowlist. The build emits the public declaration from `types/docx-preview.d.ts`. It pushes that commit and its annotated tag atomically before publishing with OIDC and creating a GitHub release. Only one release runs at a time. No npm token secret is required; `id-token: write` enables [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/).
 
-If npm publication fails after the commit/tag push, fix the cause and dispatch `release_type=current` while `master` still points at that release commit. This retries the same version. Never move a published version's tag. If npm publication succeeded but GitHub release creation failed, create only the missing GitHub release:
+If npm publication fails after the commit/tag push, fix the cause and dispatch `release_type=current`. This checks out the existing tag for the version in master’s manifest, rebuilds it, and retries the same version without moving its tag or pushing the branch. Workflow fixes can therefore be committed after a prepared release. Never move a published version's tag. If npm publication succeeded but GitHub release creation failed, create only the missing GitHub release:
 
 ```sh
 gh release create v0.4.1 --repo lofcz/docxjs --verify-tag --generate-notes --title v0.4.1

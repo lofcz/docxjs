@@ -33,6 +33,12 @@ jobs:
           ref: master
           fetch-depth: 0
 
+      - name: Checkout prepared release for retry
+        if: inputs.release_type == 'current'
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          git checkout --detach "v$VERSION"
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -66,7 +72,13 @@ jobs:
       - name: Commit and tag tested release
         env:
           VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_TYPE: ${{ inputs.release_type }}
         run: |
+          if [ "$RELEASE_TYPE" = current ]; then
+            test "$(git rev-list -n 1 "v$VERSION")" = "$(git rev-parse HEAD)"
+            git diff --exit-code -- package.json package-lock.json
+            exit 0
+          fi
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git config user.name 'github-actions[bot]'
           git add package.json package-lock.json
@@ -84,7 +96,11 @@ jobs:
           git push --atomic origin HEAD:master "refs/tags/v$VERSION"
 
       - name: Publish to npm using OIDC
-        run: npm publish --provenance --access public --registry=https://registry.npmjs.org/
+        run: |
+          node --version
+          npm --version
+          node -e 'for (const key of ["GITHUB_ACTIONS", "ACTIONS_ID_TOKEN_REQUEST_URL", "ACTIONS_ID_TOKEN_REQUEST_TOKEN"]) console.log(key + " present: " + Boolean(process.env[key]))'
+          npm publish --provenance --access public --registry=https://registry.npmjs.org/ --loglevel=verbose
 
       - name: Create GitHub release
         env:
